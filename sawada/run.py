@@ -1,184 +1,91 @@
-import csv, pickle, time
+import re
 import numpy as np
-from collections import Counter
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from gensim.models.word2vec import Word2Vec
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-from keras.models import Sequential
-from keras.layers import Dense, InputLayer, Dropout, LSTM
-from keras.callbacks import TensorBoard
-from keras.optimizers import Adam
-from keras.models import load_model
-from sklearn.metrics import precision_score, recall_score
+# dataset files
+XSS_TRAIN_FILE = 'dataset/train_level_1.csv'
+XSS_TEST_FILE = 'dataset/test_level_1.csv'
+NORMAL_TRAIN_FILE = 'dataset/normal.csv'
+NORMAL_TEST_FILE = 'dataset/normal.csv'
 
-from sawada.utils import data_loader, build_dataset
-from sawada.pre_data import pre_process
-from sawada.utils import gene_seg
+XSS_TRAIN_FILE_2 = 'dataset/train_level_2.csv'
+XSS_TEST_FILE_2 = 'dataset/test_level_2.csv'
 
-BATCH_SIZE = 500
-EPOCHS_NUM = 1
-MODEL_DIR = "sawada/models"
-log_dir = "word2vec.log"
-plt_dir = "sawada/data/word2vec.png"
-vec_dir = "sawada/data/word2vec.pickle"
+NORMAL_TRAIN_FILE_4 = 'dataset/train_level_4.csv'
+NORMAL_TEST_FILE_4 = 'dataset/test_level_4.csv'
 
-XSS_TRAIN_FILE = "dataset/train_level_2.csv"
-XSS_TEST_FILE = "dataset/test_level_2.csv"
-NORMAL_TRAIN_FILE = "dataset/normal.csv"
-NORMAL_TEST_FILE = "dataset/normal.csv"
-STOP_WORDS = ['']
+STOP_WORDS = [';', '\"', '\'']
 
-learning_rate = 0.1
-vocabulary_size = 3000
-batch_size = 128
-embedding_size = 128
-num_skips = 4
-skip_window = 5
-num_sampled = 64
-num_iter = 5
-plot_only = 100
+keys = []
+test_src = ""
+test_result = ""
 
 
-def train(train_generator, train_size, input_num, dims_num):
-    print("Start Train Job! ")
-    start = time.time()
-    inputs = InputLayer(input_shape=(input_num, dims_num), batch_size=BATCH_SIZE)
-    layer1 = LSTM(128)
-    output = Dense(2, activation="softmax", name="Output")
-    optimizer = Adam()
-    model = Sequential()
-    model.add(inputs)
-    model.add(layer1)
-    model.add(Dropout(0.5))
-    model.add(output)
-    call = TensorBoard(write_grads=True, histogram_freq=1)
-    model.compile(optimizer, loss="categorical_crossentropy", metrics=["accuracy"])
-    # model.fit_generator(train_generator, steps_per_epoch=train_size // BATCH_SIZE, epochs=EPOCHS_NUM, callbacks=[call])
-    model.fit_generator(train_generator, steps_per_epoch=5, epochs=5, callbacks=[call])
-    model.save(MODEL_DIR)
-    end = time.time()
-    print("Over train job in %f s" % (end - start))
+def clean(text):
+    target = ["</", "/>", "<", ">", "=", ":", "/", "(", ")", "[", "]", "{", "}", "＜", "＞"]
+    for ch in target:
+        text = text.replace(ch, " ")
+    return text
 
 
-def test(model_dir, test_generator, test_size, input_num, dims_num, batch_size):
-    model = load_model(model_dir)
-    labels_pre = []
-    labels_true = []
-    batch_num = test_size // batch_size + 1
-    steps = 0
-    for batch, labels in test_generator:
-        if len(labels) == batch_size:
-            labels_pre.extend(model.predict_on_batch(batch))
-        else:
-            batch = np.concatenate((batch, np.zeros((batch_size - len(labels), input_num, dims_num))))
-            labels_pre.extend(model.predict_on_batch(batch)[0:len(labels)])
-        labels_true.extend(labels)
-        steps += 1
-        print("%d/%d batch" % (steps, batch_num))
-    labels_pre = np.array(labels_pre).round()
-
-    def to_y(labels_data):
-        y = []
-        for i in range(len(labels_data)):
-            if labels_data[i][0] == 1:
-                y.append(0)
-            else:
-                y.append(1)
-        return y
-
-    y_true = to_y(labels_true)
-    y_pre = to_y(labels_pre)
-    precision = precision_score(y_true, y_pre)
-    recall = recall_score(y_true, y_pre)
-    print("Precision score is :", precision)
-    print("Recall score is :", recall)
+def data_loader(src, label):
+    data = []
+    with open(src) as f:
+        for line in f:
+            data += clean(line).split()
+    return data, [label for _ in range(len(data))]
 
 
 def run():
     """
-    前処理 データベクトル化
+    データ作成
     """
-    start = time.time()
-    words = []
-    datas = []
-    with open("sawada/data/xssed.csv", "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f, fieldnames=["payload"])
-        for row in reader:
-            payload = row["payload"]
-            word = gene_seg(payload)
-            datas.append(word)
-            words += word
+    xss_train_data, xss_train_label = data_loader(XSS_TRAIN_FILE, 'xss')
+    xss_test_data, xss_test_label = data_loader(XSS_TEST_FILE, 'xss')
+    normal_train_data, normal_train_label = data_loader(NORMAL_TRAIN_FILE_4, 'normal')
+    normal_test_data, normal_test_label = data_loader(NORMAL_TEST_FILE_4, 'normal')
 
-    def build_dataset(datas, words):
-        count = [["UNK", -1]]
-        counter = Counter(words)
-        count.extend(counter.most_common(vocabulary_size - 1))
-        vocabulary = [c[0] for c in count]
-        data_set = []
-        for data in datas:
-            d_set = []
-            for word in data:
-                if word in vocabulary:
-                    d_set.append(word)
-                else:
-                    d_set.append("UNK")
-                    count[0][1] += 1
-            data_set.append(d_set)
-        return data_set
+    X_train = xss_train_data + normal_train_data
+    y_train = xss_train_label + normal_train_label
 
-    data_set = build_dataset(datas, words)
-
-    model = Word2Vec(data_set, size=embedding_size, window=skip_window, negative=num_sampled, iter=num_iter)
-    embeddings = model.wv
-
-    def plot_with_labels(low_dim_embs, labels, filename=plt_dir):
-        plt.figure(figsize=(10, 10))
-        for i, label in enumerate(labels):
-            x, y = low_dim_embs[i, :]
-            plt.scatter(x, y)
-            plt.annotate(label, xy=(x, y), xytext=(5, 2),
-                         textcoords="offset points",
-                         ha="right",
-                         va="bottom")
-            f_text = "vocabulary_size=%d;batch_size=%d;embedding_size=%d;skip_window=%d;num_iter=%d" % (
-                vocabulary_size, batch_size, embedding_size, skip_window, num_iter
-            )
-            plt.figtext(0.03, 0.03, f_text, color="green", fontsize=10)
-        plt.show()
-        plt.savefig(filename)
-
-    tsne = TSNE(perplexity=30, n_components=2, init="pca", n_iter=5000)
-    plot_words = embeddings.index2word[:plot_only]
-    plot_embeddings = []
-    for word in plot_words:
-        plot_embeddings.append(embeddings[word])
-    low_dim_embs = tsne.fit_transform(plot_embeddings)
-    plot_with_labels(low_dim_embs, plot_words)
-
-    def save(embeddings):
-        dictionary = dict([(embeddings.index2word[i], i) for i in range(len(embeddings.index2word))])
-        reverse_dictionary = dict(zip(dictionary.values(), dictionary.keys()))
-        word2vec = {"dictionary": dictionary, "embeddings": embeddings, "reverse_dictionary": reverse_dictionary}
-        with open(vec_dir, "wb") as f:
-            pickle.dump(word2vec, f)
-
-    save(embeddings)
-    end = time.time()
-    print("Over job in ", end - start)
-    print("Saved words vec to", vec_dir)
+    X_test = xss_test_data + normal_test_data
+    y_test = xss_test_label + normal_test_label
 
     """
-    データ整形
+    データ前処理・学習機作成
     """
-    pre_process()
+    vec = TfidfVectorizer(preprocessor=clean, stop_words=STOP_WORDS)
+    X_train = vec.fit_transform(X_train)
+    X_train = X_train.todense()
+
+    clf = MultinomialNB(alpha=0.6)
+    clf.fit(X_train, y_train)
 
     """
-    学習器生成・テスト
+    テスト
     """
-    train_generator, test_generator, train_size, test_size, input_num, dims_num = build_dataset(BATCH_SIZE)
-    train(train_generator, train_size, input_num, dims_num)
-    test(MODEL_DIR, test_generator, test_size, input_num, dims_num, BATCH_SIZE)
+    X_test = vec.transform(X_test)
+    X_test = X_test.todense()
+    pred = clf.predict(X_test)
+    acc_score = accuracy_score(y_test, pred)
+    conf_mat = confusion_matrix(
+        pred, y_test, labels=['xss', 'normal']
+    )
+
+    # count = 0
+    # print("[!] fail data")
+    # for p, a in zip(pred, y_test):
+    #     if p != a:
+    #         print("-----------")
+    #         print("ans: ", a, " pred:", p)
+    #         print((normal_test_data + xss_test_data)[count])
+    #     count += 1
+
+    print("acc: \n", acc_score)
+    print("confusion matrix: \n", conf_mat)
 
 
 if __name__ == '__main__':
